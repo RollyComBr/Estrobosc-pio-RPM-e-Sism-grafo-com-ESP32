@@ -81,4 +81,7 @@ Instale as seguintes bibliotecas via Arduino IDE:
 
 Projeto adaptado e expandido por Rolly Santos, Igor Gustavo, Mateus Paiva e Nycollas Luan.
 
+## Worki
+https://wokwi.com/projects/433161634932578305
+
 ---
