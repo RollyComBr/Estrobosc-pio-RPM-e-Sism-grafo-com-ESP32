@@ -1,115 +1,109 @@
-#include <Preferences.h> // Biblioteca para armazenar dados em memória flash (NVS)
-#include <Wire.h> // Biblioteca para comunicação I2C
-#include <Adafruit_GFX.h> // Biblioteca base para displays gráficos
+/**
+ * @file main.cpp
+ * @brief Firmware para um dispositivo multifuncional baseado em ESP32.
+ * @author Grupo Alfa (Igor Gustavo, Nycollas Luan, Mateus Paiva, Rolly Santos)
+ * @date 2023-10-27
+ *
+ * Este projeto implementa um dispositivo portátil com as seguintes funções:
+ * - Estroboscópio digital com ajuste de FPM e fase.
+ * - Tacômetro digital (RPM) usando um sensor IR.
+ * - Sismógrafo/Vibrômetro usando um acelerômetro ADXL345.
+ * - Lanterna.
+ * - Modo de teste de hardware.
+ * A interface é controlada por um display OLED, um encoder rotativo e quatro botões.
+ */
+
+// --- INCLUDES & BIBLIOTECAS ---
+#include <Preferences.h>     // Biblioteca para armazenar dados na memória flash NVS (Non-Volatile Storage)
+#include <Wire.h>            // Biblioteca para comunicação I2C (usada pelo display e acelerômetro)
+#include <Adafruit_GFX.h>    // Biblioteca gráfica base para displays
 #include <Adafruit_SSD1306.h> // Biblioteca específica para o display OLED SSD1306
-#include <Adafruit_ADXL345_U.h> // Biblioteca para o acelerômetro ADXL345
+#include <Adafruit_ADXL345_U.h> // Biblioteca para o sensor acelerômetro ADXL345
 
-// Definições de largura e altura do display OLED
-#define SCREEN_WIDTH 128
-#define SCREEN_HEIGHT 64
-#define OLED_RESET -1 // Sem pino de reset
+// --- DEFINIÇÕES DE HARDWARE E CONSTANTES ---
+#define SCREEN_WIDTH 128 // Largura do display em pixels
+#define SCREEN_HEIGHT 64 // Altura do display em pixels
+#define OLED_RESET -1    // Pino de reset do OLED (-1 significa que está compartilhando o reset do ESP32)
 
-// Instância do display OLED
+// --- PINAGEM (MAPEAMENTO DE PINOS) ---
+// Pinos I2C são definidos no Wire.begin() -> SDA=21, SCL=22
+const int encoderPinA = 16;  // Pino A (CLK) do encoder rotativo
+const int encoderPinB = 17;  // Pino B (DT) do encoder rotativo
+const int buttonDouble = 18; // Botão para dobrar o valor de FPM
+const int buttonHalf = 19;   // Botão para reduzir o FPM pela metade
+const int buttonMode = 5;    // Botão para alternar entre os modos de operação (abre o menu)
+const int buttonSet = 15;    // Botão para confirmar seleção ou entrar em sub-modos (ajuste de fase)
+const int ledPin = 2;        // Pino do LED de alta potência para o estroboscópio/lanterna
+const int sensorIRPin = 4;   // Pino do sensor infravermelho para medição de RPM
+
+// --- INSTÂNCIAS DE OBJETOS ---
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
+Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345); // ID do sensor para a biblioteca
+Preferences prefs; // Objeto para manipulação da memória NVS
 
-// Instância do acelerômetro ADXL345
-Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(12345);
-bool adxlAvailable = false; // Flag que indica se o acelerômetro está disponível
+// --- VARIÁVEIS GLOBAIS DE ESTADO ---
+// Flags de sistema
+bool adxlAvailable = false; // Flag que indica se o acelerômetro foi inicializado com sucesso
+bool menuActive = false;    // Flag que indica se o menu de seleção de modo está ativo
+bool phaseSetting = false;  // Flag para o sub-modo de ajuste de fase
+bool lanternLEDState = false; // Estado do LED no modo lanterna (ligado/desligado)
+bool testRunning = false;   // Flag que indica se a sequência de teste está em execução
 
-Preferences prefs; // Objeto para armazenar preferências na memória flash do ESP32
-
-// Definição dos pinos utilizados
-//21 Pino I2C SDA
-//22 Pino I2C SCL
-const int encoderPinA = 16; // Pino A do encoder rotativo
-const int encoderPinB = 17; // Pino B do encoder rotativo
-const int buttonDouble = 18; // Botão para dobrar FPM
-const int buttonHalf = 19; // Botão para reduzir FPM pela metade
-const int buttonMode = 5; // Botão para mudar o modo de operação
-const int buttonSet = 15; // Botão para confirmar/ajustar
-const int ledPin = 2; // Pino do LED do estroboscópio
-const int sensorIRPin = 4; // Pino do sensor infravermelho (para RPM)
-
-// Variáveis para controle do encoder rotativo
-volatile long encoderValue = 0; // Valor atual do encoder
-volatile unsigned long lastEncoderInterrupt = 0; // Tempo do último movimento
-const unsigned long encoderDebounce = 2000; // Debounce para o encoder (em microssegundos)
-const unsigned long debounceButton = 500; // Debounce para os botões (em milissegundos)
-int lastEncoderValue = 0; // Valor anterior do encoder
-
-// Controle de tempo para piscar o LED (modo estroboscópio)
-unsigned long lastFlashTime = 0; // Último tempo de flash
-unsigned long intervalMicros = 1000000; // Intervalo entre flashes em microssegundos
-
-// Controle de estroboscópio
-int fpm = 30; // Flashes por minuto (FPM)
-int phase = 0; // Ajuste de fase
-unsigned long phaseDelay = 0; // Delay da fase calculado
-
-// Enumeração dos modos de operação
+// Enumeração dos modos de operação para clareza do código
 enum Mode { MODE_FREQUENCY, MODE_LANTERN, MODE_RPM, MODE_SEISMOGRAPH, MODE_TEST, MODE_ABOUT };
-Mode currentMode = MODE_FREQUENCY; // Modo atual
-int menuIndex = 0; // Índice do menu
-bool menuActive = false; // Menu ativo ou não
-bool phaseSetting = false; // Ajuste de fase ativo
-bool lanternLEDState = false; // Estado do LED no modo lanterna
-bool testRunning = false; // Indica se o teste está em execução
+Mode currentMode = MODE_FREQUENCY; // Modo inicial do dispositivo
+int menuIndex = 0; // Índice do item selecionado no menu de modos
 
-// Variáveis para medição de RPM
-volatile unsigned long lastSensorTime = 0; // Último tempo do sensor IR
-volatile unsigned long pulseInterval = 0; // Intervalo entre pulsos
-float rpmValue = 0; // Valor calculado de RPM
+// Controle do Encoder Rotativo
+volatile long encoderValue = 0; // Valor atual do encoder (incrementa/decrementa)
+int lastEncoderValue = 0;       // Último valor lido para detectar mudança
+volatile unsigned long lastEncoderInterrupt = 0; // Timestamp da última interrupção para debounce
+const unsigned long encoderDebounce = 2000; // Tempo de debounce para o encoder em microssegundos
 
-// Variáveis usadas no modo sismógrafo
-float amplitude = 0; // Amplitude de vibração
-float frequency = 0; // Frequência da vibração
-unsigned long vibStart = 0; // Início da vibração
-unsigned long vibDuration = 0; // Duração da vibração
-bool vibrationActive = false; // Indica se a vibração está ativa
-float magnitude = 0; // Magnitude calculada
+// Controle de Debounce para Botões
+const unsigned long debounceButton = 500; // Tempo de debounce para botões em milissegundos
+unsigned long lastButtonTimeDouble = 0;
+unsigned long lastButtonTimeHalf = 0;
+unsigned long lastButtonTimeMode = 0;
+unsigned long lastButtonTimeSet = 0;
 
-// Limites permitidos para FPM
-const int minFPM = 30; // FPM mínimo
-const int maxFPM = 7500; // FPM máximo
+// Variáveis do Modo Estroboscópio
+int fpm = 30; // Flashes por minuto (FPM), valor inicial
+int phase = 0; // Ajuste de fase em graus (0-359)
+unsigned long intervalMicros = 1000000; // Intervalo entre flashes em microssegundos, calculado a partir do FPM
+unsigned long phaseDelay = 0; // Atraso de fase calculado em microssegundos
+unsigned long lastFlashTime = 0; // Timestamp do último flash para controle de tempo
+const int minFPM = 30; // Limite mínimo de FPM
+const int maxFPM = 7500; // Limite máximo de FPM
 
-// Controle de debounce para botões
-unsigned long lastButtonTimeDouble = 0; // Último clique em DOUBLE
-unsigned long lastButtonTimeHalf = 0; // Último clique em HALF
-unsigned long lastButtonTimeMode = 0; // Último clique em MODE
-unsigned long lastButtonTimeSet = 0; // Último clique em SET
+// Variáveis do Modo RPM
+volatile unsigned long lastSensorTime = 0; // Timestamp da última detecção do sensor IR
+volatile unsigned long pulseInterval = 0;  // Intervalo de tempo entre pulsos do sensor IR
+float rpmValue = 0;                        // Valor de RPM calculado
 
-// Controle de tempo do teste automático
-unsigned long testStartTime = 0; // Tempo inicial do teste
-
-// Armazena os dados XYZ do acelerômetro para cálculo de frequência
-float lastXYZ[3] = {0, 0, 0}; // Últimos valores lidos para cada eixo
-unsigned long lastCrossTime[3] = {0, 0, 0}; // Último tempo de cruzamento do zero
-unsigned long intervalsXYZ[3][10]; // Intervalos entre cruzamentos do zero
-int intervalIndex[3] = {0, 0, 0}; // Índice de escrita atual em cada buffer
-bool readyXYZ[3] = {false, false, false}; // Indica se já tem dados suficientes
-float freqXYZ[3] = {0, 0, 0}; // Frequência calculada para cada eixo
-
-// Estados possíveis para o modo sismógrafo
+// Variáveis do Modo Sismógrafo
 enum SeismoState { SEISMO_IDLE, SEISMO_CALIB, SEISMO_CONFIG, SEISMO_MEASURE, SEISMO_RESULT };
-SeismoState seismoState = SEISMO_IDLE; // Estado atual do modo sismógrafo
+SeismoState seismoState = SEISMO_IDLE; // Máquina de estados interna para o modo sismógrafo
+float restAmplitude = 0.0;     // Amplitude média de repouso (tara) para calibrar o sensor
+int seismoDuration = 10;       // Duração da medição em segundos (ajustável)
+float amplitude = 0;           // Amplitude média da vibração medida
+float frequency = 0;           // Frequência média da vibração medida
+unsigned long vibDuration = 0; // Duração total da vibração em milissegundos
+float magnitude = 0;           // Magnitude calculada da vibração
+// Variáveis auxiliares para cálculos no modo sismógrafo
+unsigned long seismoTimer = 0;
+float amplitudeSum = 0.0;
+float frequencySum = 0.0;
+int seismoSamples = 0;
+unsigned long vibStart = 0;
+// Variáveis para cálculo de frequência por eixo
+float lastXYZ[3] = {0, 0, 0};
+unsigned long lastCrossTime[3] = {0, 0, 0};
 
-float restAmplitude = 0.0; // Amplitude média de repouso (tara)
-unsigned long seismoTimer = 0; // Timer usado nas medições
-int seismoDuration = 10; // Tempo de medição (ajustável pelo usuário)
-float amplitudeSum = 0.0; // Soma das amplitudes durante medição
-float frequencySum = 0.0; // Soma das frequências durante medição
-int seismoSamples = 0; // Contador de amostras válidas
+// Variáveis do Modo Teste
+unsigned long testStartTime = 0; // Timestamp do início do teste
 
-void updateInterval() {
-  fpm = constrain(fpm, minFPM, maxFPM);
-  intervalMicros = 60000000UL / fpm;
-  phaseDelay = (intervalMicros * phase) / 359;
-
-  prefs.begin("config", false);
-  prefs.putInt("fpm", fpm);
-  prefs.end();
-}
-
+// --- BITMAPS PARA O DISPLAY OLED (ARMAZENADOS NA MEMÓRIA DE PROGRAMA) ---
 const unsigned char bitmap [] PROGMEM= {
   0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
 	0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 
@@ -188,26 +182,55 @@ const unsigned char trofeu [] PROGMEM = {
 	0x00, 0x7f, 0xfe, 0x00, 0x00, 0x7f, 0xfe, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00
 };
 
+// --- FUNÇÕES DE LÓGICA ---
+
+/**
+ * @brief Atualiza o intervalo de flash e salva o FPM na memória.
+ *
+ * Calcula o intervalo em microssegundos com base no valor de FPM,
+ * aplica o ajuste de fase e salva o valor de FPM na memória NVS para
+ * que seja recuperado na próxima inicialização.
+ */
+void updateInterval() {
+  fpm = constrain(fpm, minFPM, maxFPM); // Garante que o FPM esteja dentro dos limites
+  intervalMicros = 60000000UL / fpm; // 60 segundos * 1.000.000 micros/seg / fpm
+  phaseDelay = (intervalMicros * phase) / 359; // Calcula o delay de fase
+
+  // Salva o FPM atual na memória não-volátil
+  prefs.begin("config", false); // Abre o namespace "config"
+  prefs.putInt("fpm", fpm);     // Salva o valor
+  prefs.end();                  // Fecha o namespace
+}
+
+/**
+ * @brief Atualiza o display OLED com as informações do modo atual.
+ *
+ * Limpa a tela e redesenha a interface de acordo com o modo de operação
+ * e o estado atual do sistema (menu, ajuste de fase, etc.).
+ * @note Esta função possui um controle de tempo para não ser chamada excessivamente.
+ */
 void updateDisplay() {
+  // Limita a taxa de atualização para evitar flickering e consumo de CPU
   static unsigned long lastUpdate = 0;
-  if (millis() - lastUpdate < 50) return;
+  if (millis() - lastUpdate < 50) return; // Atualiza a cada 50ms (20 FPS)
   lastUpdate = millis();
 
   display.clearDisplay();
   display.setTextSize(1);
   display.setTextColor(SSD1306_WHITE);
+
+  // --- Cabeçalho Padrão ---
   display.setCursor(0, 0);
   display.print("Modo: ");
   switch (currentMode) {
-    case MODE_FREQUENCY: display.print("Estrobo"); break;
-    case MODE_LANTERN: display.print("Lanterna"); break;
-    case MODE_RPM: display.print("RPM"); break;
+    case MODE_FREQUENCY:   display.print("Estrobo"); break;
+    case MODE_LANTERN:     display.print("Lanterna"); break;
+    case MODE_RPM:         display.print("RPM"); break;
     case MODE_SEISMOGRAPH: display.print("Sismografo"); break;
-    case MODE_TEST: display.print("Teste"); break;
-    case MODE_ABOUT: display.print("Sobre"); break;
+    case MODE_TEST:        display.print("Teste"); break;
+    case MODE_ABOUT:       display.print("Sobre"); break;
   }
   display.drawLine(0, 10, SCREEN_WIDTH, 10, SSD1306_WHITE);
-
   display.setCursor(0, 14);
 
   if (currentMode == MODE_RPM) {
@@ -287,25 +310,59 @@ void updateDisplay() {
     display.print("> Ajustando fase...");
   }
 
-  display.display();
+  display.display(); // Envia o buffer para o display
 }
 
-void handleEncoder() {
+
+// --- INTERRUPÇÕES (ISRs) ---
+
+/**
+ * @brief ISR (Interrupt Service Routine) para o encoder rotativo.
+ *
+ * Chamada na borda de descida do pino A do encoder. Lê o pino B para
+ * determinar a direção da rotação e atualiza `encoderValue`.
+ * @note ISRs devem ser o mais rápidas possível. Evite usar `delay()` ou `Serial.print()`.
+ */
+void IRAM_ATTR handleEncoder() {
   unsigned long now = micros();
+  // Debounce de software para a interrupção
   if (now - lastEncoderInterrupt > encoderDebounce) {
-    int b = digitalRead(encoderPinB);
-    if (b == LOW) encoderValue++;
-    else encoderValue--;
+    if (digitalRead(encoderPinB) == LOW) {
+      encoderValue++; // Sentido horário
+    } else {
+      encoderValue--; // Sentido anti-horário
+    }
     lastEncoderInterrupt = now;
   }
 }
 
+/**
+ * @brief ISR (Interrupt Service Routine) para o sensor de RPM.
+ *
+ * Chamada na borda de descida do sinal do sensor IR. Calcula o
+ * intervalo de tempo desde o último pulso para determinar a velocidade.
+ */
+void IR_sensor_ISR() {
+  unsigned long now = micros();
+  pulseInterval = now - lastSensorTime;
+  lastSensorTime = now;
+}
+
+
+// --- FUNÇÕES DE SETUP ---
+
+/**
+ * @brief Configura os pinos do encoder e anexa a interrupção.
+ */
 void setupEncoder() {
   pinMode(encoderPinA, INPUT_PULLUP);
   pinMode(encoderPinB, INPUT_PULLUP);
   attachInterrupt(digitalPinToInterrupt(encoderPinA), handleEncoder, FALLING);
 }
 
+/**
+ * @brief Configura os pinos dos botões como entrada com pull-up interno.
+ */
 void setupButtons() {
   pinMode(buttonDouble, INPUT_PULLUP);
   pinMode(buttonHalf, INPUT_PULLUP);
@@ -313,18 +370,24 @@ void setupButtons() {
   pinMode(buttonSet, INPUT_PULLUP);
 }
 
-void IR_sensor_ISR() {
-  unsigned long now = micros();
-  pulseInterval = now - lastSensorTime;
-  lastSensorTime = now;
-}
 
+// --- FUNÇÕES DE APOIO ---
+
+/**
+ * @brief Ajusta o FPM multiplicando-o por um fator.
+ * @param factor Fator de multiplicação (ex: 2.0 para dobrar, 0.5 para metade).
+ */
 void adjustFPM(float factor) {
   fpm = constrain(fpm * factor, minFPM, maxFPM);
-  updateInterval();
-  updateDisplay();
+  updateInterval(); // Recalcula e salva
+  updateDisplay();  // Mostra o novo valor
 }
 
+/**
+ * @brief Executa a sequência de teste de hardware.
+ *
+ * Varre o LED por uma faixa de frequências para um teste visual rápido.
+ */
 void runTestSequence() {
   static const int testSteps = 15;
   static int step = 0;
@@ -361,39 +424,74 @@ void runTestSequence() {
   }
 }
 
+
+// --- FUNÇÃO SETUP PRINCIPAL ---
+
+/**
+ * @brief Função de inicialização principal.
+ *
+ * Executada uma vez na inicialização. Configura todos os periféricos,
+ * inicializa a comunicação, carrega configurações salvas e mostra a tela de splash.
+ */
 void setup() {
+  // Inicializa o pino do LED
   pinMode(ledPin, OUTPUT);
   digitalWrite(ledPin, LOW);
+
+  // Inicializa o pino do sensor IR
   pinMode(sensorIRPin, INPUT);
 
+  // Inicia a comunicação I2C com os pinos corretos
   Wire.begin(21, 22); // SDA = 21, SCL = 22
 
-  updateInterval();
+  // Recupera o último FPM salvo na memória
+  prefs.begin("config", true); // Abre em modo de leitura
+  fpm = prefs.getInt("fpm", 30); // Carrega 'fpm', usa 30 como padrão se não existir
+  prefs.end();
+  
+  updateInterval(); // Calcula o intervalo inicial com base no FPM carregado
 
+  // Configura os periféricos de entrada
   setupEncoder();
   setupButtons();
   attachInterrupt(digitalPinToInterrupt(sensorIRPin), IR_sensor_ISR, FALLING);
   
-  display.begin(SSD1306_SWITCHCAPVCC, 0x3C);
+  // Inicializa o display OLED
+  if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) { 
+    // Serial.println(F("Falha ao inicializar SSD1306")); // Descomente para debug
+    while(1); // Trava se o display não for encontrado
+  }
+  
+  // Mostra a tela de splash
   display.clearDisplay();
   display.drawBitmap(0, 0, bitmap, SCREEN_WIDTH, SCREEN_HEIGHT, SSD1306_WHITE);
   display.display();
-  delay(3000);
+  delay(3000); // Exibe a tela de splash por 3 segundos
 
+  // Inicializa o acelerômetro
   adxlAvailable = accel.begin();
   if (adxlAvailable) {
-    accel.setRange(ADXL345_RANGE_16_G);
+    accel.setRange(ADXL345_RANGE_16_G); // Configura o range de medição
   }
 
-  updateDisplay();
+  updateDisplay(); // Exibe a tela do modo inicial
 }
 
+// --- LOOP PRINCIPAL ---
+
+/**
+ * @brief Loop principal do programa.
+ *
+ * Executado repetidamente. Gerencia a leitura dos botões, do encoder,
+ * a lógica do modo de operação atual e a atualização do display.
+ */
 void loop() {
   unsigned long now = millis();
   static bool pulseActive = false;
   static unsigned long pulseStartTime = 0;
   const unsigned int pulseDurationMicros = 100;
 
+  // --- LEITURA DOS BOTÕES COM DEBOUNCE ---
   if (digitalRead(buttonDouble) == LOW && now - lastButtonTimeDouble > debounceButton) {
     if (!menuActive && currentMode == MODE_FREQUENCY && !phaseSetting) adjustFPM(2.0);
     else if (currentMode == MODE_FREQUENCY && phaseSetting) {
@@ -465,23 +563,30 @@ void loop() {
     lastButtonTimeSet = now;
   }
 
+  // --- LEITURA DO ENCODER ---
   if (encoderValue != lastEncoderValue) {
-    int delta = encoderValue - lastEncoderValue;
+    int delta = encoderValue - lastEncoderValue; // Calcula a variação
     lastEncoderValue = encoderValue;
+
     if (menuActive) {
-      menuIndex = (menuIndex + delta + 6) % 6;
+      // Navega pelo menu
+      menuIndex = (menuIndex + delta + 6) % 6; // O "+6" evita resultados negativos no módulo
     } else if (phaseSetting && currentMode == MODE_FREQUENCY) {
+      // Ajusta a fase
       phase = (phase + delta + 360) % 360;
       updateInterval();
     } else if (currentMode == MODE_FREQUENCY) {
+      // Ajusta o FPM
       fpm += delta;
       updateInterval();
     } else if (currentMode == MODE_SEISMOGRAPH && seismoState == SEISMO_CONFIG) {
+      // Ajusta a duração da medição no sismógrafo
       seismoDuration = constrain(seismoDuration + delta, 10, 60);
     }
-    updateDisplay();
+    updateDisplay(); // Atualiza a tela após qualquer mudança
   }
 
+  // --- MÁQUINA DE ESTADOS PRINCIPAL (EXECUÇÃO DO MODO ATUAL) ---
   switch (currentMode) {
     case MODE_FREQUENCY:
       seismoState = SEISMO_IDLE;
@@ -496,14 +601,13 @@ void loop() {
         digitalWrite(ledPin, LOW);
         pulseActive = false;
       }
-
       break;
 
     case MODE_LANTERN:
       seismoState = SEISMO_IDLE;
       break;
 
-    case MODE_RPM: {
+    case MODE_RPM: { // Chaves criam um escopo local para a variável
       seismoState = SEISMO_IDLE;
       digitalWrite(ledPin, LOW);
       unsigned long intervalCopy;
@@ -517,6 +621,7 @@ void loop() {
     }
 
     case MODE_SEISMOGRAPH:
+	  digitalWrite(ledPin, LOW);
       if (adxlAvailable) {
         sensors_event_t event;
         accel.getEvent(&event);
@@ -560,8 +665,10 @@ void loop() {
         digitalWrite(ledPin, LOW);
       }
       break;
-
+      
     case MODE_ABOUT:
-    break;
+      seismoState = SEISMO_IDLE;
+	  digitalWrite(ledPin, LOW);
+      break;
   }
 }
