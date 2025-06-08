@@ -1,86 +1,113 @@
-# Sismógrafo + Estroboscópio + RPM + Lanterna com ESP32
+# Dispositivo Multifuncional com ESP32 (Estroboscópio, Tacômetro, Sismógrafo)
 
-Este projeto é um sistema multifuncional baseado no ESP32, que combina:
+Este projeto implementa um dispositivo portátil multifuncional baseado na plataforma ESP32. Ele combina diversas ferramentas úteis para análise de movimento, vibração e iluminação em um único aparelho, controlado por uma interface intuitiva com display OLED e encoder rotativo.
 
-- Medição de vibrações via acelerômetro ADXL345 (modo sismógrafo)
-- Controle de estroboscópio com LED de alta frequência (modo FPM)
-- Leitura de RPM via sensor infravermelho
-- Lanterna LED
-- Display OLED SSD1306 para interface
+## ✨ Funcionalidades
 
-## Componentes Utilizados
+O dispositivo opera em seis modos distintos:
 
-- ESP32-WROOM
-- ADXL345 (acelerômetro via I2C)
-- Display OLED 128x64 SSD1306
-- Sensor Infravermelho (reflexivo para RPM)
-- LED Branco (estroboscópio e lanterna)
-- Encoder rotativo com botão
-- Botões extras para funções auxiliares
+1.  **Estroboscópio (`Estrobo`):**
+    -   Gera flashes de luz com frequência ajustável (FPM - Flashes Por Minuto).
+    -   Faixa de operação: **30 a 7500 FPM**.
+    -   Permite o ajuste fino da **fase** (0-359°) para sincronizar o flash com o movimento do objeto.
+    -   Ideal para "congelar" visualmente objetos em rotação ou vibração.
 
-## Pinos Utilizados (ESP32)
+2.  **Lanterna (`Lanterna`):**
+    -   Acende o LED principal de forma contínua, funcionando como uma lanterna de alta intensidade.
 
-| Função             | Pino ESP32 |
-|--------------------|------------|
-| SDA (I2C)          | GPIO 21    |
-| SCL (I2C)          | GPIO 22    |
-| Encoder A          | GPIO 16    |
-| Encoder B          | GPIO 17    |
-| Botão Dobrador     | GPIO 18    |
-| Botão Divisor      | GPIO 19    |
-| Botão Modo         | GPIO 5     |
-| Botão Set/Ok       | GPIO 15    |
-| LED Estrobo        | GPIO 2     |
-| Sensor IR RPM      | GPIO 4     |
+3.  **Tacômetro (`RPM`):**
+    -   Mede a velocidade de rotação de um objeto em Rotações Por Minuto (RPM).
+    -   Utiliza um sensor infravermelho (IR) para detectar passagens de uma marca reflexiva.
 
-## Modos de Operação
+4.  **Sismógrafo / Vibrômetro (`Sismografo`):**
+    -   Utiliza um acelerômetro ADXL345 para medir e analisar vibrações.
+    -   Possui um ciclo de calibração, medição e exibição de resultados.
+    -   Mede **Amplitude**, **Frequência (Hz)** e calcula uma **Magnitude** da vibração.
 
-### 1. Frequência (Estroboscópio)
-- Controla a taxa de flashes por minuto (FPM)
-- Permite ajustar a fase
-- Botões para dobrar ou dividir a frequência
+5.  **Modo de Teste (`Teste`):**
+    -   Executa uma sequência de flashes em frequências variadas para verificar o funcionamento do LED e do sistema.
 
-### 2. Lanterna
-- Liga o LED de forma contínua
+6.  **Sobre (`Sobre`):**
+    -   Exibe os créditos dos desenvolvedores do projeto.
 
-### 3. RPM
-- Mede rotações por minuto com base no sensor IR
-- Mostra valor no display em tempo real
+## 🛠️ Hardware Necessário
 
-### 4. Sismógrafo
-- Mede vibrações em três eixos (X, Y, Z)
-- Calcula frequência e amplitude média da vibração
-- Mede a magnitude relativa
+-   1x Placa de desenvolvimento **ESP32** (ex: NodeMCU-32S, DOIT DEVKIT V1)
+-   1x Display **OLED 0.96" I2C SSD1306** (128x64 pixels)
+-   1x Módulo Acelerômetro **ADXL345**
+-   1x **Encoder Rotativo** com botão (KY-040 ou similar)
+-   4x **Botões de pressão** (push-buttons)
+-   1x **Sensor Infravermelho de Obstáculo/Reflexivo** (para o modo RPM)
+-   1x **LED de alta potência** (com driver/transistor apropriado, se necessário)
+-   Resistores, protoboard e jumpers.
 
-### 5. Teste
-- Permite simulações e testes de funcionalidades
+## 🔌 Diagrama de Conexão (Pinout)
 
-### 6. Sobre
-- Mostra informações do projeto
+| Componente                    | Conexão no ESP32  |
+| :---------------------------- | :---------------- |
+| **Display OLED (I2C)**        |                   |
+| SDA                           | GPIO 21           |
+| SCL                           | GPIO 22           |
+| **Acelerômetro ADXL345 (I2C)**|                   |
+| SDA                           | GPIO 21           |
+| SCL                           | GPIO 22           |
+| **Encoder Rotativo**          |                   |
+| CLK (Pino A)                  | GPIO 16           |
+| DT (Pino B)                   | GPIO 17           |
+| **Botões**                    |                   |
+| Botão "Dobrar FPM"            | GPIO 18           |
+| Botão "Metade FPM"            | GPIO 19           |
+| Botão "Modo"                  | GPIO 5            |
+| Botão "Set/Confirmar"         | GPIO 15           |
+| **Atuadores e Sensores**      |                   |
+| LED Principal                 | GPIO 2            |
+| Sensor IR (Saída Digital)     | GPIO 4            |
 
-## Armazenamento em Flash
+*Nota: Todos os botões e o encoder devem ser conectados com resistores de pull-up (ou usar o `INPUT_PULLUP` interno do ESP32, como no código) para garantir leituras estáveis.*
 
-Utiliza a biblioteca `Preferences` para salvar o valor de FPM entre reinicializações.
+## 📚 Bibliotecas Necessárias
 
-## Observações
+Para compilar este código na IDE do Arduino, você precisará instalar as seguintes bibliotecas através do "Gerenciador de Bibliotecas":
 
-- O sistema possui tratamento de debounce para botões e encoder
-- As medições de frequência de vibração são baseadas em cruzamentos por zero em cada eixo
-- O projeto foi adaptado de uma versão para Arduino Pro Mini, migrado para ESP32
+-   `Adafruit GFX Library`
+-   `Adafruit SSD1306`
+-   `Adafruit ADXL345`
+-   `Adafruit Unified Sensor`
 
-## Bibliotecas Necessárias
+A biblioteca `Preferences.h` já faz parte do core do ESP32 para Arduino.
 
-Instale as seguintes bibliotecas via Arduino IDE:
+## 🚀 Como Usar
 
-- `Adafruit_ADXL345_U`
-- `Adafruit_GFX`
-- `Adafruit_SSD1306`
-- `Preferences` (inclusa com ESP32)
+A interface do dispositivo foi projetada para ser simples e intuitiva.
 
-## Autor
+1.  **Ligar o Dispositivo:** Ao ligar, uma tela de splash é exibida por 3 segundos. O dispositivo então inicia no modo **Estroboscópio**, carregando o último valor de FPM salvo na memória.
 
-Projeto adaptado e expandido por Rolly Santos, Igor Gustavo, Mateus Paiva e Nycollas Luan.
+2.  **Navegar entre Modos:**
+    -   Pressione o botão **`Modo`** para abrir ou fechar o menu de seleção na parte inferior da tela.
+    -   Com o menu aberto, **gire o encoder** para selecionar o modo desejado.
+    -   Pressione o botão **`Set`** para confirmar e entrar no modo selecionado.
 
+3.  **Controles Específicos:**
+    -   **Modo Estroboscópio:**
+        -   **Gire o encoder:** Ajusta o FPM de 1 em 1.
+        -   **Botão `Dobrar`:** Multiplica o FPM por 2.
+        -   **Botão `Metade`:** Divide o FPM por 2.
+        -   **Botão `Set`:** Entra/sai do modo de ajuste de fase. No modo de fase, o encoder ajusta os graus.
+    -   **Modo Lanterna:**
+        -   **Botão `Set`:** Liga ou desliga o LED.
+    -   **Modo Sismógrafo:**
+        -   **Botão `Set`:** Inicia o processo (Calibrar -> Configurar -> Medir -> Mostrar Resultado).
+        -   Na tela de configuração, **gire o encoder** para ajustar a duração da medição.
+    -   **Modo Teste:**
+        -   **Botão `Set`:** Inicia a sequência de teste.
+
+---
+**Desenvolvido pelo Grupo Alfa:**
+*   Igor Gustavo
+*   Nycollas Luan
+*   Mateus Paiva
+*   Rolly Santos
+  
 ## Worki
 https://wokwi.com/projects/433161634932578305
 
