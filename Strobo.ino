@@ -528,6 +528,10 @@ void loop() {
     } else if (currentMode == MODE_LANTERN) {
       lanternLEDState = !lanternLEDState;
       digitalWrite(ledPin, lanternLEDState ? HIGH : LOW);
+    } else if(currentMode == MODE_RPM){
+      // Salva o FPM atual na memória não-volátil com o valor de RPM
+      fpm = rpmValue; //FPM recebe o valor de RPM
+      updateInterval(); //Atualiza o interval com novos dados
     } else if(currentMode == MODE_ABOUT){
 
     } else if (currentMode == MODE_TEST && !testRunning) {
