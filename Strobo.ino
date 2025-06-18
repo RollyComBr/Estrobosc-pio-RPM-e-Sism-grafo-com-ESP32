@@ -29,8 +29,8 @@
 #define ENCODER_PIN_B 17
 #define BUTTON_MENU   5
 #define BUTTON_SET    15
-#define BUTTON_DOUBLE 18
-#define BUTTON_HALF   19
+#define BUTTON_DOUBLE 26
+#define BUTTON_HALF   27
 #define BUTTON_ENC    25
 #define LED_PIN       2       // Pino do LED de alta potência para o estroboscópio/lanterna
 #define SENSOR_IR_PIN 4       // Pino do sensor infravermelho para medição de RPM
