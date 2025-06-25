@@ -8,7 +8,7 @@ O dispositivo opera em seis modos distintos:
 
 1.  **Estroboscópio (`Estrobo`):**
     -   Gera flashes de luz com frequência ajustável (FPM - Flashes Por Minuto).
-    -   Faixa de operação: **30 a 7500 FPM**.
+    -   Faixa de operação: **30 a 40000 FPM**.
     -   Permite o ajuste fino da **fase** (0-359°) para sincronizar o flash com o movimento do objeto.
     -   Ideal para "congelar" visualmente objetos em rotação ou vibração.
 
