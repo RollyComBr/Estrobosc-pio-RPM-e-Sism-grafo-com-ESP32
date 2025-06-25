@@ -31,8 +31,8 @@
 #define ENCODER_PIN_B 17
 #define BUTTON_MENU   5
 #define BUTTON_SET    15
-#define BUTTON_DOUBLE 18
-#define BUTTON_HALF   19
+#define BUTTON_DOUBLE 27
+#define BUTTON_HALF   26
 #define BUTTON_ENC    25
 #define LED_PIN       2       // Pino do LED de alta potência para o estroboscópio/lanterna
 #define SENSOR_IR_PIN 4       // Pino do sensor infravermelho para medição de RPM
@@ -52,9 +52,6 @@ Mode selectedMode = Mode::HOME;
 bool inMenu = true;
 bool inSubmenu = false;
 bool inEncoder = false;
-
-// ==== Variáveis do Modo Teste ====
-bool pulseActive = false;
 
 // ==== Variáveis do Modo Estroboscópio ====
 
@@ -146,7 +143,6 @@ struct TimerMicros {
 };
 TimerMicros msgTimer; //Pode criar quantos TimerMicros for necessário
 TimerMicros fpmTest;
-TimerMicros counter;
 
 // ==== Função de interrupção do timer. Alterna o estado do LED e aplica o atraso de fase na primeira chamada. ====
 void IRAM_ATTR onTimer() {
@@ -377,6 +373,16 @@ void loop() {
   updateMeasurement();
   updateCalibration();
   // --- MÁQUINA DE ESTADOS PRINCIPAL (EXECUÇÃO DO MODO ATUAL) ---
+  if (inMenu) {
+    drawMenu();
+    STB_outputEnabled=false;
+    TESTE_calc = false;
+    Lant_calc = false;
+    seismoState = SeismoState::SEISMO_HOME;
+  } else {
+    drawScreen(currentMode);
+  }
+
   if (!inMenu) {
     switch (selectedMode) {
       case Mode::FREQUENCY: {
@@ -421,10 +427,6 @@ void loop() {
         }
         break;
       }
-      case Mode::SEISMOGRAPH:{
-          
-        break;
-      }
       case Mode::LANTERN:
         STB_outputEnabled=true;
         Lant_calc = true;
@@ -457,16 +459,6 @@ void loop() {
         break;
       }
     }
-  }
-
-  if (inMenu) {
-    drawMenu();
-    STB_outputEnabled=false;
-    TESTE_calc = false;
-    Lant_calc = false;
-    seismoState = SeismoState::SEISMO_HOME;
-  } else {
-    drawScreen(currentMode);
   }
 }
 
@@ -692,7 +684,7 @@ void drawScreen(Mode mode) {
 // ==== Retorna nome do modo atual ====
 const char* getModeName(Mode mode) {
   switch (mode) {
-    case Mode::HOME: return "Principal";
+    case Mode::HOME: return "StroboTech";
     case Mode::FREQUENCY: return "Estroboscopio";
     case Mode::RPM: return "RPM";
     case Mode::LANTERN: return "Lanterna";
