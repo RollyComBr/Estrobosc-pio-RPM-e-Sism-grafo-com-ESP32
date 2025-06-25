@@ -55,8 +55,8 @@ O dispositivo opera em seis modos distintos:
 | CLK (Pino A)                  | GPIO 16           |
 | DT (Pino B)                   | GPIO 17           |
 | **Botões**                    |                   |
-| Botão "Dobrar FPM"            | GPIO 18           |
-| Botão "Metade FPM"            | GPIO 19           |
+| Botão "Dobrar FPM"            | GPIO 27           |
+| Botão "Metade FPM"            | GPIO 26           |
 | Botão "Modo"                  | GPIO 5            |
 | Botão "Set/Confirmar"         | GPIO 15           |
 | **Atuadores e Sensores**      |                   |
@@ -73,6 +73,7 @@ Para compilar este código na IDE do Arduino, você precisará instalar as segui
 -   `Adafruit SSD1306`
 -   `Adafruit ADXL345`
 -   `Adafruit Unified Sensor`
+-   `Encoder`
 
 A biblioteca `Preferences.h` já faz parte do core do ESP32 para Arduino.
 
