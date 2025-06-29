@@ -7,7 +7,7 @@
  * Este projeto implementa um dispositivo portátil com as seguintes funções:
  * - Estroboscópio digital com ajuste de FPM e fase.
  * - Tacômetro digital (RPM) usando um sensor IR.
- * - Sismógrafo/Vibrômetro usando um acelerômetro ADXL345.
+ * - Vibrômetro usando um acelerômetro ADXL345.
  * - Lanterna.
  * - Modo de teste de hardware.
  * A interface é controlada por um display OLED, um encoder rotativo e quatro botões.
@@ -22,6 +22,7 @@
 #define ENCODER_DO_NOT_USE_INTERRUPTS
 #include <Encoder.h>
 #include "bitmap_logo.h"
+#include <arduinoFFT.h>
 
 // ==== Configurações de Hardware ====
 #define SCREEN_WIDTH 128
@@ -37,16 +38,24 @@
 #define LED_PIN       2       // Pino do LED de alta potência para o estroboscópio/lanterna
 #define SENSOR_IR_PIN 4       // Pino do sensor infravermelho para medição de RPM
 
+
 Adafruit_SSD1306 display(SCREEN_WIDTH, SCREEN_HEIGHT, &Wire, OLED_RESET);
 Preferences prefs;  
 Encoder encoder(ENCODER_PIN_A, ENCODER_PIN_B);
 Adafruit_ADXL345_Unified accel = Adafruit_ADXL345_Unified(123);
 bool adxlAvailable = false;
 
+//==== Inicialização do medidor de FFT ====
+#define SAMPLE_RATE 500        // Hz
+#define FFT_SIZE 512 //Resolução da frequência 256, 512 ou 1024
+double accBuffer[FFT_SIZE];
+double timeBuffer[FFT_SIZE];
+ArduinoFFT<double> FFT = ArduinoFFT<double>(accBuffer, timeBuffer, FFT_SIZE, SAMPLE_RATE);
+
 // --- VARIÁVEIS GLOBAIS DE ESTADO ---
 
 // ==== Estados e enum de Modos ====
-enum class Mode { HOME, FREQUENCY, RPM, LANTERN, SEISMOGRAPH, TEST, ABOUT, NUM_MODES};
+enum class Mode { HOME, FREQUENCY, RPM, LANTERN, VIBROMETER, TEST, ABOUT, NUM_MODES};
 Mode currentMode = Mode::HOME;
 Mode selectedMode = Mode::HOME;
 bool inMenu = true;
@@ -73,34 +82,34 @@ const int minFPM = 30;                   // Limite mínimo de FPM
 const int maxFPM = 40000;                 // Limite máximo de FPM
 //-------------------------------------
 
-// ==== Variáveis do Sismográfo ====
-enum class SeismoState {SEISMO_HOME, SEISMO_IDLE, SEISMO_CALIB, SEISMO_CONFIG, SEISMO_MEASURE, SEISMO_RESULT};
-SeismoState seismoState = SeismoState::SEISMO_HOME;
-// Offsets de calibração
-float offsetX = 0;
-float offsetY = 0;
-float offsetZ = 0;
+// ==== Variáveis do Vibrometro ====
+enum class VibroState {VIBRO_HOME, VIBRO_IDLE, VIBRO_CALIB, VIBRO_CONFIG, VIBRO_MEASURE, VIBRO_RESULT};
+VibroState vibroState = VibroState::VIBRO_HOME;
+
+// ==== Medição ====
+float ax, ay, az;
+float aRMS, aPeak, stdDev, vRMS, freqDominant;
+float velocitySum = 0;
+
+unsigned long lastSampleTime = 0;
+int sampleCount = 0;
 
 bool isMeasuring = false;
-unsigned long measureStartTime = 0;
-unsigned long measureDuration = 10000; // 10 segundos
-float maxAmplitude = 0;
-int zeroCrossings = 0;
-bool lastPolarity = false;
-
 bool isCalibrating = false;
-int calibSamples = 100;
-int calibIndex = 0;
-unsigned long lastCalibSampleTime = 0;
-float sumX = 0, sumY = 0, sumZ = 0;
 
-float durationSec = 0;
-float freqHz = 0;
-float magnitude = 0;
+unsigned long measureStartTime = 0;
+unsigned long measureDuration = 0;
+unsigned long calibrationStartTime = 0;
+unsigned long calibrationDuration = 0;
 
-//contador decrescente do tempo de medida
-unsigned int secondsLeft;
+int secondsLeft = 0;
+int secondsLeftCalib = 0;
+
+float offsetX = 0, offsetY = 0, offsetZ = 0;
 //-------------------------------------
+// ==== Variáveis de Gravação do tempo de vibração ====
+int timeMeasure = 30;
+int timeCalib = 15;
 
 // ==== Variáveis do RPM ====
 #define TEMPO_LEITURA_RPM 1000  // em milissegundos (1 segundo)
@@ -113,6 +122,25 @@ bool Lant_calc = false;
 bool TESTE_calc = false;
 float TESTE_fpm = 0;
 //-------------------------------------
+
+// ====Mensagem sobre a equie ====
+// Lista de mensagens
+String lines[] = {
+  "Agradecimento:",
+  "Evandro Padilha",
+  "Renato",
+  "Vitor Santarosa",
+  "Alex Penteado",
+  "Bruno",
+  "Epaminondas",
+  "Fernando",
+  "Fabio Camarinha",
+  "Gabriela"
+};
+const int totalLines = sizeof(lines) / sizeof(lines[0]);
+int topLineIndex = 0;  // Índice da linha superior visível
+int lineShowMsg = 5;
+
 // ==== Temporizador ====
 struct TimerMicros {
   unsigned long start;
@@ -210,108 +238,165 @@ bool checkButtonDebounce(uint8_t pin, bool &lastState, unsigned long &lastDeboun
 // --- FUNÇÕES DE LÓGICA ---
 // ==== Grava os valores na memória ====
 void updateValuesRec(){
-  // Salva o FPM atual na memória não-volátil
   prefs.begin("config", false);  // Abre o namespace "config" no modo gravação
-  prefs.putInt("fpm", fpm);      // Salva o valor
+  if (selectedMode == Mode::VIBROMETER) {
+    prefs.putInt("timeMeasure", timeMeasure);      // Salva o valor
+    prefs.putInt("timeCalib", timeCalib);      // Salva o valor
+  }else{
+    // Salva o FPM atual na memória não-volátil
+    prefs.putInt("fpm", fpm);      // Salva o valor
+  }
   prefs.end();                   // Fecha o namespace
 }
 
-// ==== Funçoes do sismográfo calibrar e medir ====
-void startCalibration(int numSamples) {
-  seismoState = SeismoState::SEISMO_CALIB;
-  int timeSample= numSamples*100;
+// ==== Funçoes do Vibrometro calibrar e medir ====
+
+// Inicia calibração com tempo em segundos
+void startCalibration(int durationSeconds) {
   isCalibrating = true;
-  calibSamples = timeSample;
-  calibIndex = 0;
-  sumX = sumY = sumZ = 0;
-  lastCalibSampleTime = millis();
-  Serial.print("Calibrando por ");
-  Serial.print(timeSample * 10); // ou exiba segundos
-  Serial.println(" ms...");
+  calibrationDuration = durationSeconds * 1000UL;
+  calibrationStartTime = millis();
+  offsetX = 0;
+  offsetY = 0;
+  offsetZ = 0;
+  sampleCount = 0;
+  secondsLeftCalib = durationSeconds;
+  vibroState = VibroState::VIBRO_CALIB;
+  Serial.println("Iniciando calibração...");
 }
 
 void updateCalibration() {
   if (!isCalibrating) return;
 
-  if (millis() - lastCalibSampleTime >= 10) {
-    sensors_event_t event;
-    accel.getEvent(&event);
-    sumX += event.acceleration.x;
-    sumY += event.acceleration.y;
-    sumZ += event.acceleration.z;
-    calibIndex++;
-    lastCalibSampleTime = millis();
-
-    if (calibIndex >= calibSamples) {
-      offsetX = sumX / calibSamples;
-      offsetY = sumY / calibSamples;
-      offsetZ = sumZ / calibSamples;
-      isCalibrating = false;
-      seismoState = SeismoState::SEISMO_IDLE;
-      Serial.println("Calibração concluída.");
-    }
-  }
-}
-
-void startMeasurement(int durationMs) {
-  seismoState = SeismoState::SEISMO_CONFIG;
-  unsigned long time= durationMs*1000;
-  isMeasuring = true;
-  measureStartTime = millis();
-  measureDuration = time;
-
-  maxAmplitude = 0;
-  zeroCrossings = 0;
-  lastPolarity = false;
-
-  Serial.print("Iniciando medição por ");
-  Serial.print(time / 1000.0, 1);
-  Serial.println(" segundos...");
-}
-
-void updateMeasurement() {
-  if (!isMeasuring) return;
-  if(isMeasuring){
-    unsigned long elapsed = millis() - measureStartTime;
-    unsigned long remaining = (measureDuration > elapsed) ? (measureDuration - elapsed) : 0;
-    secondsLeft = remaining / 1000;
-  }
-
   unsigned long now = millis();
-  if (now - measureStartTime >= measureDuration) {
-    // Finaliza a medição
-    isMeasuring = false;
-    durationSec = measureDuration / 1000.0;
-    freqHz = (zeroCrossings / 2.0) / durationSec;
-    magnitude = log10(maxAmplitude + 1) + 1.5 * log10(durationSec + 1);
+  unsigned long elapsed = now - calibrationStartTime;
+  unsigned long remaining = (calibrationDuration > elapsed) ? (calibrationDuration - elapsed) : 0;
+  secondsLeftCalib = remaining / 1000;
 
-    seismoState = SeismoState::SEISMO_MEASURE;
-    Serial.println("--- Resultado ---");
-    Serial.print("Duração: "); Serial.print(durationSec); Serial.println(" s");
-    Serial.print("Frequência: "); Serial.print(freqHz); Serial.println(" Hz");
-    Serial.print("Amplitude máxima: "); Serial.print(maxAmplitude, 3); Serial.println(" m/s²");
-    Serial.print("Magnitude estimada: "); Serial.println(magnitude, 2);
-    Serial.println("-----------------");
-    return;
-  }
-
-  // Leitura e processamento
   sensors_event_t event;
   accel.getEvent(&event);
-  float x = event.acceleration.x - offsetX;
-  float y = event.acceleration.y - offsetY;
-  float z = event.acceleration.z - offsetZ;
-  float acc = sqrt(x * x + y * y + z * z);
+  offsetX += event.acceleration.x;
+  offsetY += event.acceleration.y;
+  offsetZ += event.acceleration.z;
+  sampleCount++;
 
-  if (acc > maxAmplitude) maxAmplitude = acc;
+  if (elapsed >= calibrationDuration) {
+    offsetX /= sampleCount;
+    offsetY /= sampleCount;
+    offsetZ /= sampleCount;
+    isCalibrating = false;
+    vibroState = VibroState::VIBRO_IDLE;
+    Serial.println("Calibração concluída!");
+    Serial.print("Offset X: "); Serial.println(offsetX);
+    Serial.print("Offset Y: "); Serial.println(offsetY);
+    Serial.print("Offset Z: "); Serial.println(offsetZ);
+  }
+}
+//vibroState = VibroState::VIBRO_CONFIG;
+void startMeasurement(int durationSeconds) {
+  isMeasuring = true;
+  measureStartTime = millis();
+  measureDuration = durationSeconds * 1000UL;
+  secondsLeft = durationSeconds;
 
-  bool currentPolarity = acc > 0;
-  if (currentPolarity != lastPolarity) {
-    zeroCrossings++;
-    lastPolarity = currentPolarity;
+  sampleCount = 0;
+  velocitySum = 0;
+  aPeak = 0;
+  aRMS = 0;
+  stdDev = 0;
+  freqDominant = 0;
+  lastSampleTime = 0;
+  vibroState = VibroState::VIBRO_CONFIG;
+  Serial.println("Iniciando medição...");
+}
+//vibroState = VibroState::VIBRO_MEASURE;
+void updateMeasurement() {
+  if (!isMeasuring) return;
+
+  unsigned long now = millis();
+  unsigned long elapsed = now - measureStartTime;
+  unsigned long remaining = (measureDuration > elapsed) ? (measureDuration - elapsed) : 0;
+  secondsLeft = remaining / 1000;
+
+  if (micros() - lastSampleTime >= 1000000UL / SAMPLE_RATE && sampleCount < FFT_SIZE) {
+    lastSampleTime = micros();
+
+    sensors_event_t event;
+    accel.getEvent(&event);
+
+    float x = event.acceleration.x - offsetX;
+    float y = event.acceleration.y - offsetY;
+    float z = event.acceleration.z - offsetZ;
+
+    float acc = sqrt(x * x + y * y + z * z);
+
+    accBuffer[sampleCount] = acc;
+    timeBuffer[sampleCount] = 0.0;
+    velocitySum += acc / SAMPLE_RATE;
+
+    if (acc > aPeak) aPeak = acc;
+    sampleCount++;
   }
 
-  // Nenhum delay: roda rápido e não bloqueia o loop
+  if (elapsed >= measureDuration && sampleCount == FFT_SIZE) {
+    isMeasuring = false;
+
+    float sum = 0, sumSq = 0;
+    for (int i = 0; i < FFT_SIZE; i++) {
+      sum += accBuffer[i];
+      sumSq += accBuffer[i] * accBuffer[i];
+    }
+
+    float mean = sum / FFT_SIZE;
+    aRMS = sqrt(sumSq / FFT_SIZE);
+
+    float variance = 0;
+    for (int i = 0; i < FFT_SIZE; i++) {
+      variance += pow(accBuffer[i] - mean, 2);
+    }
+    stdDev = sqrt(variance / FFT_SIZE);
+    vRMS = velocitySum / FFT_SIZE;
+
+    // Remoção de offset DC
+    double dcOffset = 0;
+    for (int i = 0; i < FFT_SIZE; i++) {
+      dcOffset += accBuffer[i];
+    }
+    dcOffset /= FFT_SIZE;
+    for (int i = 0; i < FFT_SIZE; i++) {
+      accBuffer[i] -= dcOffset;
+    }
+
+    FFT.windowing(FFT_WIN_TYP_HAMMING, FFT_FORWARD);
+    FFT.compute(FFT_FORWARD);
+    FFT.complexToMagnitude();
+
+    double maxMag = 0;
+    int index = 0;
+    for (int i = 1; i < FFT_SIZE / 2; i++) {
+      if (accBuffer[i] > maxMag && accBuffer[i] > 5.0) { // Filtro de ruído
+        maxMag = accBuffer[i];
+        index = i;
+      }
+    }
+
+    freqDominant = (index * SAMPLE_RATE) / (float)FFT_SIZE;
+
+    Serial.print("Magnitude FFT pico: "); Serial.println(maxMag);
+
+    // Filtro adicional para descartar leitura de frequência em estado estático
+    if (aRMS < 0.15 && stdDev < 0.05 && vRMS < 0.01 && maxMag < 5.0) {
+      freqDominant = 0;
+    }
+    vibroState = VibroState::VIBRO_MEASURE;
+    Serial.println("\n--- RESULTADO ---");
+    Serial.print("Pico Acel: "); Serial.print(aPeak, 3); Serial.println(" m/s²");
+    Serial.print("RMS Acel: "); Serial.print(aRMS, 3); Serial.println(" m/s²");
+    Serial.print("Desvio padrão: "); Serial.print(stdDev, 3); Serial.println(" m/s²");
+    Serial.print("Velocidade RMS: "); Serial.print(vRMS, 3); Serial.println(" m/s");
+    Serial.print("Freq. dominante: "); Serial.print(freqDominant, 2); Serial.println(" Hz");
+    Serial.println("-----------------");
+  }
 }
 
 // ==== Setup dos botões ====
@@ -336,13 +421,15 @@ void setup() {
   // Recupera o último FPM salvo na memória
   prefs.begin("config", true);    // Abre o namespace "config" em modo de leitura
   fpm = prefs.getInt("fpm", 30);  // Carrega 'fpm', usa 30 como padrão se não existir
+  timeCalib = prefs.getInt("timeCalib", 30);  // Carrega 'timeCalib', usa 30 como padrão se não existir
+  timeMeasure = prefs.getInt("timeMeasure", 30);  // Carrega 'timeMeasure', usa 30 como padrão se não existir
   prefs.end();
   STB_calc = true;
 
   Serial.begin(115200);
 
   adxlAvailable = accel.begin();
-  if (adxlAvailable) accel.setRange(ADXL345_RANGE_16_G);
+  if (adxlAvailable) accel.setRange(ADXL345_RANGE_4_G);
   
   if (!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println(F("Falha ao iniciar OLED"));
@@ -378,7 +465,7 @@ void loop() {
     STB_outputEnabled=false;
     TESTE_calc = false;
     Lant_calc = false;
-    seismoState = SeismoState::SEISMO_HOME;
+    vibroState = VibroState::VIBRO_HOME;
   } else {
     drawScreen(currentMode);
   }
@@ -487,29 +574,28 @@ void handleInput() {
       selectedMode = currentMode;
       inMenu = false;
     } else {
-      if (selectedMode == Mode::SEISMOGRAPH) {
-        
-        switch (seismoState) {
+      if (selectedMode == Mode::VIBROMETER) {
+        switch (vibroState) {
           //Clique SET para iniciar
-          case SeismoState::SEISMO_HOME:
-            seismoState = SeismoState::SEISMO_CALIB;
+          case VibroState::VIBRO_HOME:
+            vibroState = VibroState::VIBRO_CALIB;
             break;
-          case SeismoState::SEISMO_CALIB:
-            startCalibration(3); //3 segundos
+          case VibroState::VIBRO_CALIB:
+            startCalibration(timeCalib); //10 segundos
             break;
-          case SeismoState::SEISMO_IDLE:
-            //seismoState = SeismoState::SEISMO_CONFIG;
-            startMeasurement(10); //10 segundos
+          case VibroState::VIBRO_IDLE:
+            startMeasurement(timeMeasure); //10 segundos
+            updateValuesRec();
             break;
-          case SeismoState::SEISMO_CONFIG:
-            //seismoState = SeismoState::SEISMO_MEASURE;
+          case VibroState::VIBRO_CONFIG:
+            //vibroState = VibroState::VIBRO_MEASURE;
             //measureSeismicActivity();
             break;
-          case SeismoState::SEISMO_MEASURE:
-            seismoState = SeismoState::SEISMO_RESULT;
+          case VibroState::VIBRO_MEASURE:
+            vibroState = VibroState::VIBRO_RESULT;
             break;
-          case SeismoState::SEISMO_RESULT:
-            seismoState = SeismoState::SEISMO_HOME;
+          case VibroState::VIBRO_RESULT:
+            vibroState = VibroState::VIBRO_HOME;
             break;
         }
       } else if (selectedMode == Mode::RPM) {
@@ -533,8 +619,15 @@ void handleInput() {
 
   if (checkButtonDebounce(BUTTON_DOUBLE, lastSetState, lastDebounceTimeSet)) {
     if (inMenu) {
-      selectedMode = currentMode;
-      inMenu = false;
+      currentMode = static_cast<Mode>((static_cast<int>(currentMode) + 1) % static_cast<int>(Mode::NUM_MODES));
+    } else if(selectedMode == Mode::HOME){
+      if (topLineIndex < totalLines - lineShowMsg) { // lineShowMsg = linhas cabem na tela
+        topLineIndex++;
+      }
+    } else if(currentMode == Mode::VIBROMETER && vibroState == VibroState::VIBRO_CALIB){
+      timeCalib = constrain(timeCalib - 5, 5, 30);
+    }  else if(currentMode == Mode::VIBROMETER && vibroState == VibroState::VIBRO_IDLE){
+      timeMeasure = constrain(timeMeasure - 10, 10, 60);
     } else {
       if (selectedMode == Mode::FREQUENCY && !inSubmenu) {
         adjustFPM(0.5);
@@ -545,8 +638,15 @@ void handleInput() {
 
   if (checkButtonDebounce(BUTTON_HALF, lastSetState, lastDebounceTimeSet)) {
     if (inMenu) {
-      selectedMode = currentMode;
-      inMenu = false;
+      currentMode = static_cast<Mode>((static_cast<int>(currentMode) - 1) % static_cast<int>(Mode::NUM_MODES));
+    } else if(selectedMode == Mode::HOME){
+      if (topLineIndex > 0) {
+        topLineIndex--;
+      }
+    } else if(currentMode == Mode::VIBROMETER && vibroState == VibroState::VIBRO_CALIB){
+      timeCalib = constrain(timeCalib + 5, 5, 30);
+    } else if(currentMode == Mode::VIBROMETER && vibroState == VibroState::VIBRO_IDLE){
+      timeMeasure = constrain(timeMeasure + 10, 10, 60);
     } else {
       if (selectedMode == Mode::FREQUENCY && !inSubmenu) {
         adjustFPM(2.0);
@@ -624,6 +724,14 @@ void drawScreen(Mode mode) {
     display.print("LANTERNA");
     display.setCursor(0, 56);
     display.println("MENU=Voltar");
+  } else if (currentMode == Mode::HOME) {
+    for (int i = 0; i < lineShowMsg; i++) {
+      int lineIndex = topLineIndex + i;
+      if (lineIndex < totalLines) {
+        display.setCursor(0, (i + 1) * 10);
+        display.print(lines[lineIndex]);
+      }
+    }
   } else if (currentMode == Mode::FREQUENCY) {
     display.setTextSize(2);
     display.setCursor(0, 14);
@@ -644,34 +752,55 @@ void drawScreen(Mode mode) {
       display.setCursor(0, 56);
       display.println(">>Editar Phase");
     }
-  } else if (currentMode == Mode::SEISMOGRAPH){
+  } else if (currentMode == Mode::VIBROMETER){
     if (adxlAvailable){
-      switch (seismoState) {
-        case SeismoState::SEISMO_HOME:
+      switch (vibroState) {
+        case VibroState::VIBRO_HOME:
           display.println("Coloque sobre o motor para calibrar");
           break;
-        case SeismoState::SEISMO_CALIB:
-          display.println(isCalibrating ? "Calibrando..." : "SET para calibrar");
+        case VibroState::VIBRO_CALIB:
+         if(!isCalibrating){
+          display.print("Tempo de calibracao: ");
+          display.print(timeCalib);
+          display.println("s");
+          display.println("");
+          display.println("SET para calibrar");
+         }else{
+          display.println("Calibrando...");
+          display.println("");
+          display.print("Tempo restante: ");
+          display.print(secondsLeftCalib);
+          display.println("s");
+         }
           break;
-        case SeismoState::SEISMO_IDLE:
+        case VibroState::VIBRO_IDLE:
+          display.print("Tempo de medida: ");
+          display.print(timeMeasure);
+          display.println("s");
+          display.println("");
           display.println("Ligue o motor, pres-");
-          display.println("sione SET para iniciar");
+          display.println("sione SET p/ iniciar");
         break;
-        case SeismoState::SEISMO_CONFIG:
-            display.println("Medindo...");
-            display.print("Tempo restante: ");
-            display.print(secondsLeft);
-            display.println("s");
-            break;
-        case SeismoState::SEISMO_MEASURE:
-          display.println("RESULTADO:");
-          display.print("Dur: "); display.print(durationSec); display.println(" s");
-          display.print("Amp: "); display.print(maxAmplitude, 3); display.println(" g");
-          display.print("Freq: "); display.print(freqHz, 2); display.println(" Hz");
-          display.print("Mag: "); display.println(magnitude, 2);
+        case VibroState::VIBRO_CONFIG:
+          display.println("Medindo...");
+          display.println("");
+          display.print("Tempo restante: ");
+          display.print(secondsLeft);
+          display.println("s");
           break;
-        case SeismoState::SEISMO_RESULT:
-          display.println("SET para reiniciar");
+        case VibroState::VIBRO_MEASURE:
+          display.print("PA: "); display.print(aPeak, 3); display.println("m/s2");
+          display.print("RMS A: "); display.print(aRMS, 3); display.println("m/s2");
+          display.print("DP: "); display.print(stdDev, 3); display.println("m/s2");
+          display.print("V RMS: "); display.print(vRMS, 3); display.println("m/s");
+          display.print("FD: "); display.print(freqDominant, 2); display.println("Hz");
+          break;
+        case VibroState::VIBRO_RESULT:
+          display.println("PA: Pico de Acel.");
+          display.println("RMS A: RMS de Acel.");
+          display.println("DP: Desvio Padrao");
+          display.println("V RMS: Vel. de RMS");
+          display.println("FD: Freq. Dominante");
           break;
       }
     }else{
@@ -688,7 +817,7 @@ const char* getModeName(Mode mode) {
     case Mode::FREQUENCY: return "Estroboscopio";
     case Mode::RPM: return "RPM";
     case Mode::LANTERN: return "Lanterna";
-    case Mode::SEISMOGRAPH: return "Sismografo";
+    case Mode::VIBROMETER: return "Vibrometro";
     case Mode::TEST: return "Teste";
     case Mode::ABOUT: return "Sobre";
   }
